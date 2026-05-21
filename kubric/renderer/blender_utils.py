@@ -289,11 +289,11 @@ def get_render_layers_from_exr(filename) -> Dict[str, np.ndarray]:
     # with RG being the first layer and BA being the second
     # So the R and B channels are uint32 and the G and A channels are float32.
     crypto_layers = [n for n in layer_names if n.startswith("CryptoObject")]
-    index_channels = [n + "." + c for n in crypto_layers for c in "rb"]
+    index_channels = [n + "." + c for n in crypto_layers for c in "RB"]
     idxs = read_channels_from_exr(exr, index_channels)
     idxs.dtype = np.uint32
     output["segmentation_indices"] = idxs
-    alpha_channels = [n + "." + c for n in crypto_layers for c in "ga"]
+    alpha_channels = [n + "." + c for n in crypto_layers for c in "GA"]
     alphas = read_channels_from_exr(exr, alpha_channels)
     output["segmentation_alphas"] = alphas
   if "ObjectCoordinates" in layer_names:
@@ -503,8 +503,6 @@ def process_rgba(exr_layers, scene):  # pylint: disable=unused-argument
 
 def process_rgb(exr_layers, scene):  # pylint: disable=unused-argument
   return exr_layers["rgba"][..., :3]
-<<<<<<< HEAD
-
 
 def process_rgba_sharp(exr_layers, scene):  # pylint: disable=unused-argument
   return exr_layers["rgba_sharp"]
@@ -518,5 +516,3 @@ def process_rgba_blur(exr_layers, scene):  # pylint: disable=unused-argument
   return exr_layers["rgba_blur"]
 
 
-=======
->>>>>>> 63243f347584f034020a022cbb6258b201940ed4
