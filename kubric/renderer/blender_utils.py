@@ -1,4 +1,4 @@
-# Copyright 2024 The Kubric Authors.
+# Copyright 2026 The Kubric Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -289,11 +289,11 @@ def get_render_layers_from_exr(filename) -> Dict[str, np.ndarray]:
     # with RG being the first layer and BA being the second
     # So the R and B channels are uint32 and the G and A channels are float32.
     crypto_layers = [n for n in layer_names if n.startswith("CryptoObject")]
-    index_channels = [n + "." + c for n in crypto_layers for c in "RB"]
+    index_channels = [n + "." + c for n in crypto_layers for c in "rb"]
     idxs = read_channels_from_exr(exr, index_channels)
     idxs.dtype = np.uint32
     output["segmentation_indices"] = idxs
-    alpha_channels = [n + "." + c for n in crypto_layers for c in "GA"]
+    alpha_channels = [n + "." + c for n in crypto_layers for c in "ga"]
     alphas = read_channels_from_exr(exr, alpha_channels)
     output["segmentation_alphas"] = alphas
   if "ObjectCoordinates" in layer_names:
@@ -316,7 +316,11 @@ def replace_cryptomatte_hashes_by_asset_index(
   new_segmentation_ids = np.zeros_like(segmentation_ids)
   for idx, asset in enumerate(assets, start=1):
     asset_hash = mm3hash(asset.uid)
-    new_segmentation_ids[segmentation_ids == asset_hash] = idx
+    if hasattr(asset, "segmentation_id") and asset.segmentation_id is not None:
+      uid = asset.segmentation_id
+    else:
+      uid = idx
+    new_segmentation_ids[segmentation_ids == asset_hash] = uid
   return new_segmentation_ids
 
 
@@ -499,6 +503,7 @@ def process_rgba(exr_layers, scene):  # pylint: disable=unused-argument
 
 def process_rgb(exr_layers, scene):  # pylint: disable=unused-argument
   return exr_layers["rgba"][..., :3]
+<<<<<<< HEAD
 
 
 def process_rgba_sharp(exr_layers, scene):  # pylint: disable=unused-argument
@@ -513,3 +518,5 @@ def process_rgba_blur(exr_layers, scene):  # pylint: disable=unused-argument
   return exr_layers["rgba_blur"]
 
 
+=======
+>>>>>>> 63243f347584f034020a022cbb6258b201940ed4

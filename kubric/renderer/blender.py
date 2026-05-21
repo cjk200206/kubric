@@ -1,4 +1,4 @@
-# Copyright 2024 The Kubric Authors.
+# Copyright 2026 The Kubric Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -34,6 +34,24 @@ import numpy as np
 import tensorflow as tf
 
 logger = logging.getLogger(__name__)
+
+
+def add_top_level_empty_parent(name: str = "Empty") -> bpy.types.Object:
+  """Adds an empty parent to scene and makes it the parent of all objects.
+
+  Args:
+    name: The name of the empty parent.
+
+  Returns:
+    The newly created empty parent.
+  """
+  parent_obj = bpy.data.objects.new(name, None)
+  parent_obj.rotation_mode = "QUATERNION"
+  bpy.context.scene.collection.objects.link(parent_obj)
+  for obj in bpy.context.scene.objects:
+    if obj != parent_obj and obj.parent is None:
+      obj.parent = parent_obj
+  return parent_obj
 
 
 # noinspection PyUnresolvedReferences
@@ -440,7 +458,7 @@ class Blender(core.View):
       with io.StringIO() as fstdout:  # < scratch stdout buffer
         with redirect_stdout(fstdout):  # < also suppresses python stdout
           if extension == "obj":
-            bpy.ops.import_scene.obj(filepath=obj.render_filename,
+            bpy.ops.wm.obj_import(filepath=obj.render_filename,
                                      use_split_objects=False,
                                      **obj.render_import_kwargs)
           elif extension in ["glb", "gltf"]:
@@ -454,34 +472,46 @@ class Blender(core.View):
                   location=True, rotation=True, scale=True
               )
 
-            # gltf files often contain "Empty" objects as placeholders for camera / lights etc.
-            # here we are interested only in the meshes, we filter these out and join all meshes into one.
-            mesh = [m for m in bpy.context.selected_objects if m.type == "MESH"]
-            assert mesh
-            for ob in mesh:
-              ob.select_set(state=True)
-              bpy.context.view_layer.objects.active = ob
+            if obj.use_parenting_instead_of_join:
+              parent_obj = add_top_level_empty_parent(obj.uid)
+              bpy.ops.object.select_all(action="DESELECT")
+              parent_obj.select_set(state=True)
+            else:
+              # Legacy loader which relies on JOIN. NOTE: This will destroy
+              # things like animations.
+              # gltf files often contain "Empty" objects as placeholders for
+              # camera / lights etc.
+              # here we are interested only in the meshes, we filter these out
+              # and join all meshes into one.
+              mesh = [
+                  m for m in bpy.context.selected_objects if m.type == "MESH"
+              ]
+              assert mesh
+              for ob in mesh:
+                ob.select_set(state=True)
+                bpy.context.view_layer.objects.active = ob
 
-            # make sure one of the objects is active, otherwise join() fails.
-            # see https://blender.stackexchange.com/questions/132266/joining-all-meshes-in-any-context-gets-error
-            bpy.context.view_layer.objects.active = mesh[0]
-            bpy.ops.object.join()
+              # make sure one of the objects is active, otherwise join() fails.
+              # see https://blender.stackexchange.com/questions/132266/joining-all-meshes-in-any-context-gets-error
+              bpy.context.view_layer.objects.active = mesh[0]
+              bpy.ops.object.join()
 
-            # Make sure to delete all remaining non-mesh objects. Note that for
-            # some reason deleting the non-mesh objets before joining removes
-            # parts of the meshes in some cases.
-            non_mesh_objects = [
-                obj
-                for obj in bpy.context.selected_objects
-                if obj.type != "MESH"
-            ]
-            with bpy.context.temp_override(selected_objects=non_mesh_objects):
-              bpy.ops.object.delete()
+              # Make sure to delete all remaining non-mesh objects. Note that
+              # for some reason deleting the non-mesh objets before joining
+              # removes parts of the meshes in some cases.
+              non_mesh_objects = [
+                  obj
+                  for obj in bpy.context.selected_objects
+                  if obj.type != "MESH"
+              ]
+              with bpy.context.temp_override(selected_objects=non_mesh_objects):
+                bpy.ops.object.delete()
 
             assert len(bpy.context.selected_objects) == 1
-            blender_obj = bpy.context.selected_objects[0]
-            blender_obj.rotation_quaternion = (0.707107, -0.707107, 0, 0)
-            bpy.ops.object.transform_apply(location=False, rotation=True, scale=False)
+            if not obj.do_not_rotate_glb_90_degrees_after_import:
+              blender_obj = bpy.context.selected_objects[0]
+              blender_obj.rotation_quaternion = (0.707107, -0.707107, 0, 0)
+              bpy.ops.object.transform_apply(location=False, rotation=True, scale=False)
 
           elif extension == "fbx":
             bpy.ops.import_scene.fbx(filepath=obj.render_filename,
@@ -505,7 +535,8 @@ class Blender(core.View):
 
     # deactivate auto_smooth because for some reason it lead to no smoothing at all
     # TODO: make smoothing configurable
-    blender_obj.data.use_auto_smooth = False
+    if hasattr(blender_obj.data, "use_auto_smooth"):
+      blender_obj.data.use_auto_smooth = False
 
     register_object3d_setters(obj, blender_obj)
     obj.observe(AttributeSetter(blender_obj, "active_material",
@@ -633,8 +664,8 @@ class Blender(core.View):
     obj.observe(AttributeSetter(bsdf_node.inputs["Metallic"], "default_value"), "metallic")
     obj.observe(KeyframeSetter(bsdf_node.inputs["Metallic"], "default_value"), "metallic",
                 type="keyframe")
-    obj.observe(AttributeSetter(bsdf_node.inputs["Specular"], "default_value"), "specular")
-    obj.observe(KeyframeSetter(bsdf_node.inputs["Specular"], "default_value"), "specular",
+    obj.observe(AttributeSetter(bsdf_node.inputs["Specular IOR Level"], "default_value"), "specular")
+    obj.observe(KeyframeSetter(bsdf_node.inputs["Specular IOR Level"], "default_value"), "specular",
                 type="keyframe")
     obj.observe(AttributeSetter(bsdf_node.inputs["Specular Tint"],
                                 "default_value"), "specular_tint")
@@ -643,15 +674,11 @@ class Blender(core.View):
     obj.observe(AttributeSetter(bsdf_node.inputs["IOR"], "default_value"), "ior")
     obj.observe(KeyframeSetter(bsdf_node.inputs["IOR"], "default_value"), "ior",
                 type="keyframe")
-    obj.observe(AttributeSetter(bsdf_node.inputs["Transmission"], "default_value"), "transmission")
-    obj.observe(KeyframeSetter(bsdf_node.inputs["Transmission"], "default_value"), "transmission",
+    obj.observe(AttributeSetter(bsdf_node.inputs["Transmission Weight"], "default_value"), "transmission")
+    obj.observe(KeyframeSetter(bsdf_node.inputs["Transmission Weight"], "default_value"), "transmission",
                 type="keyframe")
-    obj.observe(AttributeSetter(bsdf_node.inputs["Transmission Roughness"], "default_value"),
-                "transmission_roughness")
-    obj.observe(KeyframeSetter(bsdf_node.inputs["Transmission Roughness"], "default_value"),
-                "transmission_roughness", type="keyframe")
-    obj.observe(AttributeSetter(bsdf_node.inputs["Emission"], "default_value"), "emission")
-    obj.observe(KeyframeSetter(bsdf_node.inputs["Emission"], "default_value"), "emission",
+    obj.observe(AttributeSetter(bsdf_node.inputs["Emission Color"], "default_value"), "emission")
+    obj.observe(KeyframeSetter(bsdf_node.inputs["Emission Color"], "default_value"), "emission",
                 type="keyframe")
     return mat
 

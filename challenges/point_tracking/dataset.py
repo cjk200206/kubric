@@ -1,4 +1,4 @@
-# Copyright 2024 The Kubric Authors.
+# Copyright 2026 The Kubric Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -802,8 +802,29 @@ def track_points(
 
   all_relative_depth = all_reproj_depth / chosen_points_depth[..., tf.newaxis]
 
-  return tf.cast(chosen_points, tf.float32), tf.cast(all_reproj,
-                                                     tf.float32), all_occ, all_relative_depth
+  # Pad to tracks_to_sample by repeating last row if necessary.
+  # Note this shouldn't be necessary in most cases but sometimes we end up with
+  # fewer points than requested.
+  chosen_points = _pad_with_last_row(chosen_points, tracks_to_sample)
+  all_reproj = _pad_with_last_row(all_reproj, tracks_to_sample)
+  all_occ = _pad_with_last_row(all_occ, tracks_to_sample)
+  all_relative_depth = _pad_with_last_row(all_relative_depth, tracks_to_sample)
+
+  return (
+      tf.cast(chosen_points, tf.float32),
+      tf.cast(all_reproj, tf.float32),
+      all_occ,
+      all_relative_depth,
+  )
+
+
+def _pad_with_last_row(arr, desired_length):
+  """Pad the array with the last row to the desired first axis length."""
+  last_row = arr[-2:-1]
+  last_row_rep = tf.tile(
+      last_row, [desired_length - tf.shape(arr)[0]] + [1] * (arr.ndim - 1)
+  )
+  return tf.concat([arr, last_row_rep], axis=0)
 
 
 def _get_distorted_bounding_box(
@@ -846,8 +867,7 @@ def add_tracks(data,
   Args:
     data: Kubric data, including RGB/depth/object coordinate/segmentation
       videos and camera parameters.
-    train_size: Cropped output will be at this resolution.  Ignored if
-      random_crop is False.
+    train_size: Output will be at this resolution.
     vflip: whether to vertically flip images and tracks (to test generalization)
     random_crop: Whether to randomly crop videos
     tracks_to_sample: Total number of tracks to sample per video.
@@ -919,6 +939,9 @@ def add_tracks(data,
   relative_depth.set_shape([tracks_to_sample, num_frames])
   occluded.set_shape([tracks_to_sample, num_frames])
 
+  query_points *= [1, train_size[0] / shp[1], train_size[1] / shp[2]]
+  target_points *= [train_size[1] / shp[2], train_size[0] / shp[1]]
+
   # Crop the video to the sampled window, in a way which matches the coordinate
   # frame produced the track_points functions.
   start = tf.tensor_scatter_nd_update(
@@ -962,7 +985,7 @@ def create_point_tracking_dataset(
   """Construct a dataset for point tracking using Kubric.
 
   Args:
-    train_size: Tuple of 2 ints. Cropped output will be at this resolution
+    train_size: Tuple of 2 ints. Output will be at this resolution
     shuffle_buffer_size: Int. Size of the shuffle buffer
     split: Which split to construct from Kubric.  Can be 'train' or
       'validation'.
