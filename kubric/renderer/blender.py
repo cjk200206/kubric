@@ -98,6 +98,8 @@ class Blender(core.View):
     self.background_transparency = background_transparency
 
     self.exr_output_node = blender_utils.set_up_exr_output_node(motion_blur=motion_blur)
+    self.sharp_png_output_node = self.blender_scene.node_tree.nodes["KubricSharpPNGOutput"]
+    self.blur_png_output_node = self.blender_scene.node_tree.nodes["KubricBlurPNGOutput"]
 
     self.post_processors = {
         "backward_flow": blender_utils.process_backward_flow,
@@ -110,6 +112,9 @@ class Blender(core.View):
         "segmentation": blender_utils.process_segementation,
         "rgb": blender_utils.process_rgb,
         "rgba": blender_utils.process_rgba,
+        "rgba_sharp": blender_utils.process_rgba_sharp,
+        "rgb_blur": blender_utils.process_rgb_blur,
+        "rgba_blur": blender_utils.process_rgba_blur,
     }
 
     super().__init__(scene, scene_observers={
@@ -203,6 +208,21 @@ class Blender(core.View):
       self.exr_output_node.mute = False
       self.exr_output_node.base_path = str(path_prefix)
 
+  def set_dual_png_output_paths(self, sharp_path_prefix: Optional[PathLike],
+                                blur_path_prefix: Optional[PathLike]):
+    """Set target path prefixes for clear/blur PNG compositor outputs."""
+    if sharp_path_prefix is None:
+      self.sharp_png_output_node.mute = True
+    else:
+      self.sharp_png_output_node.mute = False
+      self.sharp_png_output_node.base_path = str(sharp_path_prefix)
+
+    if blur_path_prefix is None:
+      self.blur_png_output_node.mute = True
+    else:
+      self.blur_png_output_node.mute = False
+      self.blur_png_output_node.base_path = str(blur_path_prefix)
+
   def save_state(self, path: PathLike, pack_textures: bool = True):
     """Saves the '.blend' blender file to disk.
 
@@ -267,6 +287,10 @@ class Blender(core.View):
     if not ignore_missing_textures:
       self._check_missing_textures()
     self.set_exr_output_path(self.scratch_dir / "exr" / "frame_")
+    self.set_dual_png_output_paths(
+        self.scratch_dir / "png_sharp",
+        self.scratch_dir / "png_blur"
+    )
     # --- starts rendering
     if frames is None:
       frames = range(self.scene.frame_start, self.scene.frame_end + 1)
@@ -332,13 +356,17 @@ class Blender(core.View):
     # --- collect all layers for all frames
     data_stack = collections.defaultdict(list)
     exr_frames = sorted((from_dir / "exr").glob("*.exr"))
-    png_frames = [from_dir / "images" / (exr_filename.stem + ".png")
-                  for exr_filename in exr_frames]
 
-    for exr_filename, png_filename in zip(exr_frames, png_frames):
+    for exr_filename in exr_frames:
+      frame_name = exr_filename.stem
+      sharp_png_filename = from_dir / "png_sharp" / f"{frame_name}.png"
+      blur_png_filename = from_dir / "png_blur" / f"{frame_name}.png"
+
       source_layers = blender_utils.get_render_layers_from_exr(exr_filename)
-      # Use the contrast-normalized PNG instead of the EXR for RGBA.
-      source_layers["rgba"] = file_io.read_png(png_filename)
+      source_layers["rgba_sharp"] = file_io.read_png(sharp_png_filename)
+      source_layers["rgba_blur"] = file_io.read_png(blur_png_filename)
+      # Keep backward compatibility for existing callers requesting `rgba`/`rgb`.
+      source_layers["rgba"] = source_layers["rgba_blur"]
 
       for key in return_layers:
         post_processor = self.post_processors[key]

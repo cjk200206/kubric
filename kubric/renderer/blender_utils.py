@@ -67,12 +67,7 @@ def prepare_blender_object(func: AddAssetFunction) -> AddAssetFunction:
 def set_up_exr_output_node(default_layers=("Image", "Depth"),
                            aux_layers=("UV", "Normal", "CryptoObject00", "ObjectCoordinates"),
                            motion_blur=None):
-  """ Set up the blender compositor nodes required for exporting EXR files.
-
-  The filename can then be set with:
-  out_node.base_path = "my/custom/path/prefix_"
-
-  """
+  """ Set up compositor nodes for EXR output plus aligned sharp/blur PNG outputs. """
   bpy.context.scene.use_nodes = True
   tree = bpy.context.scene.node_tree
   links = tree.links
@@ -81,15 +76,15 @@ def set_up_exr_output_node(default_layers=("Image", "Depth"),
   for node in tree.nodes:
     tree.nodes.remove(node)
 
-  # the render node has outputs for all the rendered layers
+  # render layers
   render_node = tree.nodes.new(type="CompositorNodeRLayers")
   render_node_aux = tree.nodes.new(type="CompositorNodeRLayers")
   render_node_aux.name = "Render Layers Aux"
   render_node_aux.layer = "AuxOutputs"
 
-  # create a new FileOutput node
+  # EXR (multilayer) output
   out_node = tree.nodes.new(type="CompositorNodeOutputFile")
-  # set the format to EXR (multilayer)
+  out_node.name = "KubricEXROutput"
   out_node.format.file_format = "OPEN_EXR_MULTILAYER"
 
   out_node.file_slots.clear()
@@ -101,8 +96,11 @@ def set_up_exr_output_node(default_layers=("Image", "Depth"),
     out_node.file_slots.new(layer_name)
     links.new(render_node_aux.outputs.get(layer_name), out_node.inputs.get(layer_name))
 
-  # manually convert to RGBA. See:
-  # https://blender.stackexchange.com/questions/175621/incorrect-vector-pass-output-no-alpha-zero-values/175646#175646
+  # Keep a clean image layer in EXR before vector blur is applied.
+  out_node.file_slots.new("ImageSharp")
+  links.new(render_node.outputs.get("Image"), out_node.inputs.get("ImageSharp"))
+
+  # Manually convert vector pass to RGBA layout.
   split_rgba = tree.nodes.new(type="CompositorNodeSepRGBA")
   combine_rgba = tree.nodes.new(type="CompositorNodeCombRGBA")
   for channel in "RGBA":
@@ -111,9 +109,12 @@ def set_up_exr_output_node(default_layers=("Image", "Depth"),
   links.new(render_node_aux.outputs.get("Vector"), split_rgba.inputs.get("Image"))
   links.new(combine_rgba.outputs.get("Image"), out_node.inputs.get("Vector"))
 
+  # Build blur branch (or passthrough) and keep both image sockets.
+  sharp_image_socket = render_node.outputs.get("Image")
+  blur_image_socket = sharp_image_socket
+
   if motion_blur is not None:
     assert isinstance(motion_blur, float), motion_blur
-    # we then add a vector blur that uses optical flow to blur the image
     motion_blur_node = tree.nodes.new(type="CompositorNodeVecBlur")
     composite_out = tree.nodes.new(type="CompositorNodeComposite")
     motion_blur_node.factor = motion_blur
@@ -121,9 +122,32 @@ def set_up_exr_output_node(default_layers=("Image", "Depth"),
     links.new(render_node.outputs.get("Image"), motion_blur_node.inputs.get("Image"))
     links.new(render_node.outputs.get("Depth"), motion_blur_node.inputs.get("Z"))
     links.new(render_node_aux.outputs.get("Vector"), motion_blur_node.inputs.get("Speed"))
+
+    # EXR "Image" keeps blurred output for backward compatibility.
     links.remove(out_node.inputs.get("Image").links[0])
     links.new(motion_blur_node.outputs.get("Image"), out_node.inputs.get("Image"))
     links.new(motion_blur_node.outputs.get("Image"), composite_out.inputs.get("Image"))
+    blur_image_socket = motion_blur_node.outputs.get("Image")
+
+  # PNG output for clear image
+  sharp_png_node = tree.nodes.new(type="CompositorNodeOutputFile")
+  sharp_png_node.name = "KubricSharpPNGOutput"
+  sharp_png_node.format.file_format = "PNG"
+  sharp_png_node.format.color_mode = "RGBA"
+  sharp_png_node.file_slots.clear()
+  sharp_png_node.file_slots.new("Image")
+  sharp_png_node.file_slots[0].path = "frame_"
+  links.new(sharp_image_socket, sharp_png_node.inputs.get("Image"))
+
+  # PNG output for blurred image
+  blur_png_node = tree.nodes.new(type="CompositorNodeOutputFile")
+  blur_png_node.name = "KubricBlurPNGOutput"
+  blur_png_node.format.file_format = "PNG"
+  blur_png_node.format.color_mode = "RGBA"
+  blur_png_node.file_slots.clear()
+  blur_png_node.file_slots.new("Image")
+  blur_png_node.file_slots[0].path = "frame_"
+  links.new(blur_image_socket, blur_png_node.inputs.get("Image"))
 
   return out_node
 
@@ -229,6 +253,9 @@ def get_render_layers_from_exr(filename) -> Dict[str, np.ndarray]:
     # Image is in RGBA format with range [0, inf]
     output["linear_rgba"] = read_channels_from_exr(exr, ["Image.R", "Image.G",
                                                          "Image.B", "Image.A"])
+  if "ImageSharp" in layer_names:
+    output["linear_rgba_sharp"] = read_channels_from_exr(
+        exr, ["ImageSharp.R", "ImageSharp.G", "ImageSharp.B", "ImageSharp.A"])
   if "Depth" in layer_names:
     # range [0, 10000000000.0]  # the value 1e10 is used for background / infinity
     output["depth"] = read_channels_from_exr(exr, ["Depth.V"])
@@ -472,5 +499,17 @@ def process_rgba(exr_layers, scene):  # pylint: disable=unused-argument
 
 def process_rgb(exr_layers, scene):  # pylint: disable=unused-argument
   return exr_layers["rgba"][..., :3]
+
+
+def process_rgba_sharp(exr_layers, scene):  # pylint: disable=unused-argument
+  return exr_layers["rgba_sharp"]
+
+
+def process_rgb_blur(exr_layers, scene):  # pylint: disable=unused-argument
+  return exr_layers["rgba_blur"][..., :3]
+
+
+def process_rgba_blur(exr_layers, scene):  # pylint: disable=unused-argument
+  return exr_layers["rgba_blur"]
 
 

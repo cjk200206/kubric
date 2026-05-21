@@ -36,8 +36,11 @@ parser.add_argument("--backgrounds_split", choices=["train", "test"],
 
 parser.add_argument("--camera", choices=["fixed_random", "linear_movement", "linear_movement_linear_lookat"],
                     default="fixed_random")
-parser.add_argument("--max_camera_movement", type=float, default=4.0)
-parser.add_argument("--max_motion_blur", type=float, default=0.0)
+parser.add_argument("--max_camera_movement", type=float, default=8.0)
+# parser.add_argument("--min_motion_blur", type=float, default=0.0)
+# parser.add_argument("--max_motion_blur", type=float, default=0.0)
+parser.add_argument("--min_motion_blur", type=float, default=0.0)
+parser.add_argument("--max_motion_blur", type=float, default=2.0)
 
 
 # Configuration for the source of the assets
@@ -61,15 +64,17 @@ FLAGS = parser.parse_args()
 # --- Common setups & resources
 scene, rng, output_dir, scratch_dir = kb.setup(FLAGS)
 
-motion_blur = rng.uniform(0, FLAGS.max_motion_blur)
+if FLAGS.min_motion_blur > FLAGS.max_motion_blur:
+  raise ValueError(f"min_motion_blur ({FLAGS.min_motion_blur}) must be <= max_motion_blur ({FLAGS.max_motion_blur}).")
+
+motion_blur = rng.uniform(FLAGS.min_motion_blur, FLAGS.max_motion_blur)
 if motion_blur > 0.0:
   logging.info(f"Using motion blur strength {motion_blur}")
 
 simulator = PyBullet(scene, scratch_dir)
+# Keep clear render in `rgba`; render blur in a second pass with the same renderer.
 renderer = Blender(scene, scratch_dir, use_denoising=True, samples_per_pixel=64,
                    motion_blur=motion_blur)
-# renderer = Blender(scene, scratch_dir, use_denoising=True, samples_per_pixel=16,
-#                    motion_blur=motion_blur)
 kubasic = kb.AssetSource.from_manifest(FLAGS.kubasic_assets)
 gso = kb.AssetSource.from_manifest(FLAGS.gso_assets)
 hdri_source = kb.AssetSource.from_manifest(FLAGS.hdri_assets)
@@ -88,6 +93,7 @@ background_hdri = hdri_source.create(asset_id=hdri_id)
 #assert isinstance(background_hdri, kb.Texture)
 logging.info("Using background %s", hdri_id)
 scene.metadata["background"] = hdri_id
+scene.metadata["motion_blur"] = motion_blur
 renderer._set_ambient_light_hdri(background_hdri.filename)
 
 # Dome
@@ -278,10 +284,11 @@ if FLAGS.save_state:
 
 
 logging.info("Rendering the scene ...")
-# data_stack = renderer.render()
 data_stack = renderer.render(
-    return_layers=("rgba", "depth", "normal", "object_coordinates", "segmentation")
+    return_layers=("rgba_sharp", "rgba_blur", "depth", "normal", "object_coordinates", "segmentation")
 )
+# Keep naming convention: clear image stays under `rgba`.
+data_stack["rgba"] = data_stack.pop("rgba_sharp")
 
 # --- Postprocessing
 kb.compute_visibility(data_stack["segmentation"], scene.assets)

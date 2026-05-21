@@ -1083,14 +1083,54 @@ def plot_tracks(rgb, points, occluded, trackgroup=None):
   return np.stack(disp, axis=0)
 
 
+# def main():
+#   ds = tfds.as_numpy(create_point_tracking_dataset(shuffle_buffer_size=None))
+#   for i, data in enumerate(ds):
+#     disp = plot_tracks(data['video'] * .5 + .5, data['target_points'],
+#                        data['occluded'])
+#     media.write_video(f'{i}.mp4', disp, fps=10)
+#     if i > 10:
+#       
+
+import os
+from PIL import Image
+
 def main():
-  ds = tfds.as_numpy(create_point_tracking_dataset(shuffle_buffer_size=None))
+  dataset_dir = "./kubric_movi_f"
+  os.makedirs(dataset_dir, exist_ok=True)
+
+  ds = tfds.as_numpy(create_point_tracking_dataset(
+    train_size=(512, 512),
+    shuffle_buffer_size=None,
+    split="train",
+    batch_dims=tuple(),
+    repeat=True,
+    vflip=False,
+    random_crop=True,
+    tracks_to_sample=2048,
+    sampling_stride=4,
+    max_seg_id=25,
+    max_sampled_frac=0.1,
+    num_parallel_point_extraction_calls=16
+  ))
+
   for i, data in enumerate(ds):
-    disp = plot_tracks(data['video'] * .5 + .5, data['target_points'],
-                       data['occluded'])
-    media.write_video(f'{i}.mp4', disp, fps=10)
-    if i > 10:
-      break
+      print(i)
+      seq_num = "0" * (4 - len(str(i))) + str(i)
+      os.makedirs(os.path.join(dataset_dir, seq_num), exist_ok=True)
+      os.makedirs(os.path.join(dataset_dir, seq_num, "frames"), exist_ok=True)
+      for i_frame, frame in enumerate(data["video"]):
+          Image.fromarray((((frame + 1) / 2.0) * 255.0).astype("uint8")).save(
+              os.path.join(dataset_dir, seq_num, "frames", f"{i_frame:03d}.png")
+          )
+      traj_annots = {"coords": data["target_points"], "visibility": data["occluded"]}
+      np.save(os.path.join(dataset_dir, seq_num, seq_num + ".npy"), traj_annots)
+    
+      # visualize res
+      disp = plot_tracks(
+          data["video"] * 0.5 + 0.5, data["target_points"], data["occluded"]
+      )
+      media.write_video(os.path.join(dataset_dir, f"{seq_num}.mp4"), disp, fps=10)
 
 
 if __name__ == '__main__':

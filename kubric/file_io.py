@@ -244,6 +244,27 @@ def write_rgba_batch(data, directory, file_template="rgba_{:05d}.png", max_write
   multi_write_image(data, path_template, write_fn=write_png, max_write_threads=max_write_threads)
 
 
+def write_rgba_sharp_batch(data, directory, file_template="rgba_sharp_{:05d}.png",
+                           max_write_threads=16):
+  assert data.ndim == 4 and data.shape[-1] == 4, data.shape
+  path_template = str(as_path(directory) / file_template)
+  multi_write_image(data, path_template, write_fn=write_png, max_write_threads=max_write_threads)
+
+
+def write_rgb_blur_batch(data, directory, file_template="rgb_blur_{:05d}.png",
+                         max_write_threads=16):
+  assert data.ndim == 4 and data.shape[-1] == 3, data.shape
+  path_template = str(as_path(directory) / file_template)
+  multi_write_image(data, path_template, write_fn=write_png, max_write_threads=max_write_threads)
+
+
+def write_rgba_blur_batch(data, directory, file_template="rgba_blur_{:05d}.png",
+                          max_write_threads=16):
+  assert data.ndim == 4 and data.shape[-1] == 4, data.shape
+  path_template = str(as_path(directory) / file_template)
+  multi_write_image(data, path_template, write_fn=write_png, max_write_threads=max_write_threads)
+
+
 def write_uv_batch(data, directory, file_template="uv_{:05d}.png", max_write_threads=16):
   assert data.ndim == 4 and data.shape[-1] == 3, data.shape
   path_template = str(as_path(directory) / file_template)
@@ -310,6 +331,9 @@ write_backward_flow_batch = functools.partial(write_flow_batch, name="backward_f
 DEFAULT_WRITERS = {
     "rgb": write_rgb_batch,
     "rgba": write_rgba_batch,
+    "rgb_blur": write_rgb_blur_batch,
+    "rgba_blur": write_rgba_blur_batch,
+    "rgba_sharp": write_rgba_sharp_batch,
     "depth": write_depth_batch,
     "uv": write_uv_batch,
     "normal": write_normal_batch,
