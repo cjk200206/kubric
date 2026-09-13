@@ -13,7 +13,7 @@ import numpy as np
 # the region in which to place objects [(min), (max)]
 STATIC_SPAWN_REGION = [(-7, -7, 0), (7, 7, 10)]
 DYNAMIC_SPAWN_REGION = [(-5, -5, 1), (5, 5, 5)]
-VELOCITY_RANGE = [(-4., -4., 0.), (4., 4., 0.)]
+VELOCITY_RANGE = [(-8., -8., 0.), (8., 8., 0.)]
 
 # --- CLI arguments
 parser = kb.ArgumentParser()
@@ -36,11 +36,15 @@ parser.add_argument("--backgrounds_split", choices=["train", "test"],
 
 parser.add_argument("--camera", choices=["fixed_random", "linear_movement", "linear_movement_linear_lookat"],
                     default="fixed_random")
-parser.add_argument("--max_camera_movement", type=float, default=8.0)
+parser.add_argument("--min_camera_movement", type=float, default=6.0)
+parser.add_argument("--max_camera_movement", type=float, default=12.0)
+parser.add_argument("--lookat_inner_radius", type=float, default=1.0)
+parser.add_argument("--lookat_outer_radius", type=float, default=4.0)
+parser.add_argument("--lookat_continuation_max", type=float, default=1.0)
 # parser.add_argument("--min_motion_blur", type=float, default=0.0)
 # parser.add_argument("--max_motion_blur", type=float, default=0.0)
-parser.add_argument("--min_motion_blur", type=float, default=0.0)
-parser.add_argument("--max_motion_blur", type=float, default=2.0)
+parser.add_argument("--min_motion_blur", type=float, default=2.0)
+parser.add_argument("--max_motion_blur", type=float, default=5.0)
 parser.add_argument("--min_blur_exposure", type=float, default=0.0,
                     help="minimum image-domain exposure applied only to blurred RGB, in stops")
 parser.add_argument("--max_blur_exposure", type=float, default=0.0,
@@ -72,6 +76,10 @@ if FLAGS.min_motion_blur > FLAGS.max_motion_blur:
   raise ValueError(f"min_motion_blur ({FLAGS.min_motion_blur}) must be <= max_motion_blur ({FLAGS.max_motion_blur}).")
 if FLAGS.min_blur_exposure > FLAGS.max_blur_exposure:
   raise ValueError(f"min_blur_exposure ({FLAGS.min_blur_exposure}) must be <= max_blur_exposure ({FLAGS.max_blur_exposure}).")
+if FLAGS.lookat_inner_radius > FLAGS.lookat_outer_radius:
+  raise ValueError(f"lookat_inner_radius ({FLAGS.lookat_inner_radius}) must be <= lookat_outer_radius ({FLAGS.lookat_outer_radius}).")
+if FLAGS.lookat_continuation_max < 0.0:
+  raise ValueError(f"lookat_continuation_max ({FLAGS.lookat_continuation_max}) must be >= 0.")
 
 motion_blur = rng.uniform(FLAGS.min_motion_blur, FLAGS.max_motion_blur)
 if motion_blur > 0.0:
@@ -138,7 +146,8 @@ def get_linear_camera_motion_start_end(
 
 def get_linear_lookat_motion_start_end(
     inner_radius: float = 1.0,
-    outer_radius: float = 4.0,
+    outer_radius: float = 6.0,
+    continuation_max: float = 1.0,
 ):
   """Sample a linear path which goes through the workspace center."""
   while True:
@@ -156,6 +165,7 @@ def get_linear_lookat_motion_start_end(
 
     # Continue the trajectory beyond the point in the workspace center, so the
     # final path passes through that point.
+    # continuation = rng.rand(1) * continuation_max
     continuation = rng.rand(1) * 0.5
     camera_end = camera_through + continuation * (camera_through - camera_start)
 
@@ -183,10 +193,14 @@ elif (
   is_panning = FLAGS.camera == "linear_movement_linear_lookat"
   camera_inner_radius = 6.0 if is_panning else 8.0
   camera_start, camera_end = get_linear_camera_motion_start_end(
-      movement_speed=rng.uniform(low=0., high=FLAGS.max_camera_movement)
+      movement_speed=rng.uniform(low=FLAGS.min_camera_movement, high=FLAGS.max_camera_movement)
   )
   if is_panning:
-    lookat_start, lookat_end = get_linear_lookat_motion_start_end()
+    lookat_start, lookat_end = get_linear_lookat_motion_start_end(
+        inner_radius=FLAGS.lookat_inner_radius,
+        outer_radius=FLAGS.lookat_outer_radius,
+        continuation_max=FLAGS.lookat_continuation_max,
+    )
 
   # linearly interpolate the camera position between these two points
   # while keeping it focused on the center of the scene

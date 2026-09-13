@@ -13,21 +13,47 @@ import numpy as np
 # the region in which to place objects [(min), (max)]
 STATIC_SPAWN_REGION = [(-7, -7, 0), (7, 7, 10)]
 DYNAMIC_SPAWN_REGION = [(-5, -5, 1), (5, 5, 5)]
-VELOCITY_RANGE = [(-4., -4., 0.), (4., 4., 0.)]
+# DYNAMIC_TARGET_REGION = [(-1.5, -1.5, 0.), (1.5, 1.5, 0.)]
+DYNAMIC_TARGET_REGION = [(-2.5, -2.5, 0.), (2.5, 2.5, 0.)]
+
+# Object-focused dataset profile. Adjust these defaults directly when needed.
+OBJECT_FOCUSED_CAMERA_MODE = "linear_movement"
+MIN_CAMERA_MOVEMENT = 0.0
+MAX_CAMERA_MOVEMENT = 4.0
+MIN_OBJECT_SPEED = 12.0
+MAX_OBJECT_SPEED = 16.0
+MIN_MOTION_BLUR = 2.0
+MAX_MOTION_BLUR = 5.0
+
+# underexpose
+# MIN_BLUR_EXPOSURE = -3.5
+# MAX_BLUR_EXPOSURE = -1.5
+
+# overexpose
+# MIN_BLUR_EXPOSURE = 1.0
+# MAX_BLUR_EXPOSURE = 2.5
+
+# normal exposure
+MIN_BLUR_EXPOSURE = 0
+MAX_BLUR_EXPOSURE = 0
 
 # --- CLI arguments
 parser = kb.ArgumentParser()
 parser.add_argument("--objects_split", choices=["train", "test"],
                     default="train")
 # Configuration for the objects of the scene
-parser.add_argument("--min_num_static_objects", type=int, default=10,
+parser.add_argument("--min_num_static_objects", type=int, default=4,
                     help="minimum number of static (distractor) objects")
-parser.add_argument("--max_num_static_objects", type=int, default=20,
+parser.add_argument("--max_num_static_objects", type=int, default=8,
                     help="maximum number of static (distractor) objects")
-parser.add_argument("--min_num_dynamic_objects", type=int, default=1,
+parser.add_argument("--min_num_dynamic_objects", type=int, default=5,
                     help="minimum number of dynamic (tossed) objects")
-parser.add_argument("--max_num_dynamic_objects", type=int, default=3,
+parser.add_argument("--max_num_dynamic_objects", type=int, default=5,
                     help="maximum number of dynamic (tossed) objects")
+parser.add_argument("--min_object_speed", type=float, default=MIN_OBJECT_SPEED,
+                    help="minimum initial XY speed for dynamic objects in world units per second")
+parser.add_argument("--max_object_speed", type=float, default=MAX_OBJECT_SPEED,
+                    help="maximum initial XY speed for dynamic objects in world units per second")
 # Configuration for the floor and background
 parser.add_argument("--floor_friction", type=float, default=0.3)
 parser.add_argument("--floor_restitution", type=float, default=0.5)
@@ -36,14 +62,18 @@ parser.add_argument("--backgrounds_split", choices=["train", "test"],
 
 parser.add_argument("--camera", choices=["fixed_random", "linear_movement", "linear_movement_linear_lookat"],
                     default="fixed_random")
-parser.add_argument("--max_camera_movement", type=float, default=8.0)
+parser.add_argument("--min_camera_movement", type=float, default=MIN_CAMERA_MOVEMENT)
+parser.add_argument("--max_camera_movement", type=float, default=MAX_CAMERA_MOVEMENT)
+parser.add_argument("--lookat_inner_radius", type=float, default=1.0)
+parser.add_argument("--lookat_outer_radius", type=float, default=4.0)
+parser.add_argument("--lookat_continuation_max", type=float, default=1.0)
 # parser.add_argument("--min_motion_blur", type=float, default=0.0)
 # parser.add_argument("--max_motion_blur", type=float, default=0.0)
-parser.add_argument("--min_motion_blur", type=float, default=0.0)
-parser.add_argument("--max_motion_blur", type=float, default=2.0)
-parser.add_argument("--min_blur_exposure", type=float, default=0.0,
+parser.add_argument("--min_motion_blur", type=float, default=MIN_MOTION_BLUR)
+parser.add_argument("--max_motion_blur", type=float, default=MAX_MOTION_BLUR)
+parser.add_argument("--min_blur_exposure", type=float, default=MIN_BLUR_EXPOSURE,
                     help="minimum image-domain exposure applied only to blurred RGB, in stops")
-parser.add_argument("--max_blur_exposure", type=float, default=0.0,
+parser.add_argument("--max_blur_exposure", type=float, default=MAX_BLUR_EXPOSURE,
                     help="maximum image-domain exposure applied only to blurred RGB, in stops")
 
 
@@ -64,14 +94,22 @@ parser.add_argument("--save_state", dest="save_state", action="store_true")
 parser.set_defaults(save_state=False, frame_end=96, frame_rate=48,
                     resolution=512)
 FLAGS = parser.parse_args()
+# sample.py always forwards a camera mode; this worker deliberately owns the effective mode.
+FLAGS.camera = OBJECT_FOCUSED_CAMERA_MODE
 
 # --- Common setups & resources
 scene, rng, output_dir, scratch_dir = kb.setup(FLAGS)
 
 if FLAGS.min_motion_blur > FLAGS.max_motion_blur:
   raise ValueError(f"min_motion_blur ({FLAGS.min_motion_blur}) must be <= max_motion_blur ({FLAGS.max_motion_blur}).")
+if FLAGS.min_object_speed < 0.0 or FLAGS.min_object_speed > FLAGS.max_object_speed:
+  raise ValueError(f"Expected 0 <= min_object_speed <= max_object_speed, got {FLAGS.min_object_speed} and {FLAGS.max_object_speed}.")
 if FLAGS.min_blur_exposure > FLAGS.max_blur_exposure:
   raise ValueError(f"min_blur_exposure ({FLAGS.min_blur_exposure}) must be <= max_blur_exposure ({FLAGS.max_blur_exposure}).")
+if FLAGS.lookat_inner_radius > FLAGS.lookat_outer_radius:
+  raise ValueError(f"lookat_inner_radius ({FLAGS.lookat_inner_radius}) must be <= lookat_outer_radius ({FLAGS.lookat_outer_radius}).")
+if FLAGS.lookat_continuation_max < 0.0:
+  raise ValueError(f"lookat_continuation_max ({FLAGS.lookat_continuation_max}) must be >= 0.")
 
 motion_blur = rng.uniform(FLAGS.min_motion_blur, FLAGS.max_motion_blur)
 if motion_blur > 0.0:
@@ -138,7 +176,8 @@ def get_linear_camera_motion_start_end(
 
 def get_linear_lookat_motion_start_end(
     inner_radius: float = 1.0,
-    outer_radius: float = 4.0,
+    outer_radius: float = 6.0,
+    continuation_max: float = 1.0,
 ):
   """Sample a linear path which goes through the workspace center."""
   while True:
@@ -156,7 +195,7 @@ def get_linear_lookat_motion_start_end(
 
     # Continue the trajectory beyond the point in the workspace center, so the
     # final path passes through that point.
-    continuation = rng.rand(1) * 0.5
+    continuation = rng.rand(1) * continuation_max
     camera_end = camera_through + continuation * (camera_through - camera_start)
 
     # Second point will probably be closer to the workspace center than the
@@ -172,6 +211,7 @@ def get_linear_lookat_motion_start_end(
 logging.info("Setting up the Camera...")
 scene.camera = kb.PerspectiveCamera(focal_length=35., sensor_width=32)
 if FLAGS.camera == "fixed_random":
+  scene.metadata["camera_movement"] = 0.0
   scene.camera.position = kb.sample_point_in_half_sphere_shell(
       inner_radius=7., outer_radius=9., offset=0.1)
   scene.camera.look_at((0, 0, 0))
@@ -182,11 +222,19 @@ elif (
 
   is_panning = FLAGS.camera == "linear_movement_linear_lookat"
   camera_inner_radius = 6.0 if is_panning else 8.0
+  camera_movement = rng.uniform(low=FLAGS.min_camera_movement,
+                                high=FLAGS.max_camera_movement)
+  scene.metadata["camera_movement"] = camera_movement
   camera_start, camera_end = get_linear_camera_motion_start_end(
-      movement_speed=rng.uniform(low=0., high=FLAGS.max_camera_movement)
+      movement_speed=camera_movement,
+      inner_radius=camera_inner_radius,
   )
   if is_panning:
-    lookat_start, lookat_end = get_linear_lookat_motion_start_end()
+    lookat_start, lookat_end = get_linear_lookat_motion_start_end(
+        inner_radius=FLAGS.lookat_inner_radius,
+        outer_radius=FLAGS.lookat_outer_radius,
+        continuation_max=FLAGS.lookat_continuation_max,
+    )
 
   # linearly interpolate the camera position between these two points
   # while keeping it focused on the center of the scene
@@ -262,15 +310,22 @@ logging.info("Randomly placing %d dynamic objects:", num_dynamic_objects)
 for i in range(num_dynamic_objects):
   obj = gso.create(asset_id=rng.choice(active_split))
   assert isinstance(obj, kb.FileBasedObject)
-  scale = rng.uniform(0.75, 3.0)
+  scale = rng.uniform(1.25, 2.5)
   obj.scale = scale / np.max(obj.bounds[1] - obj.bounds[0])
   obj.metadata["scale"] = scale
   scene += obj
   kb.move_until_no_overlap(obj, simulator, spawn_region=DYNAMIC_SPAWN_REGION,
                            rng=rng)
-  obj.velocity = (rng.uniform(*VELOCITY_RANGE) -
-                  [obj.position[0], obj.position[1], 0])
+  motion_target = rng.uniform(*DYNAMIC_TARGET_REGION)
+  motion_direction = motion_target - [obj.position[0], obj.position[1], 0]
+  motion_direction[2] = 0.0
+  motion_direction /= np.linalg.norm(motion_direction)
+  initial_speed = rng.uniform(FLAGS.min_object_speed, FLAGS.max_object_speed)
+  obj.velocity = motion_direction * initial_speed
   obj.metadata["is_dynamic"] = True
+  obj.metadata["motion_target"] = motion_target
+  obj.metadata["initial_speed"] = initial_speed
+  obj.metadata["initial_velocity"] = obj.velocity
   logging.info("    Added %s at %s", obj.asset_id, obj.position)
 
 
@@ -298,8 +353,9 @@ data_stack = renderer.render(
 )
 # Keep naming convention: clear image stays under `rgba`.
 data_stack["rgba"] = data_stack.pop("rgba_sharp")
-# Apply exposure only to the blurred RGB branch. The sharp rgba remains the
-# unmodified source used later by Vid2E/ESIM.
+
+# Apply adverse exposure only to the blurred RGB branch. The sharp `rgba`
+# remains untouched and is the source used later by Vid2E/ESIM.
 if blur_exposure != 0.0:
   blur_rgba = data_stack["rgba_blur"]
   channel_max = np.iinfo(blur_rgba.dtype).max
@@ -307,7 +363,6 @@ if blur_exposure != 0.0:
   adjusted_blur[..., :3] *= 2.0 ** float(blur_exposure)
   data_stack["rgba_blur"] = np.clip(
       adjusted_blur, 0.0, channel_max).astype(blur_rgba.dtype)
-
 
 # --- Postprocessing
 kb.compute_visibility(data_stack["segmentation"], scene.assets)
